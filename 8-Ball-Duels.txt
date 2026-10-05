@@ -1,0 +1,375 @@
+if _G.PoolTrainingHelper then _G.PoolTrainingHelper.Stop() end
+local RS=game:GetService("RunService")
+local UIS=game:GetService("UserInputService")
+local scene=nil
+local sceneAddress=nil
+local Players=game:GetService("Players")
+local H={Enabled=true,Running=true,Stats={}}
+local powerLabel=nil
+local physics={deceleration=10,minSpeed=30,maxSpeed=138,curve=2,stopSpeed=0.5,
+ railRestitution=0.72,railFriction=0.20,ballRestitution=0.94,breakMultiplier=2.5}
+local function shotSpeed(power) return physics.minSpeed+(physics.maxSpeed-physics.minSpeed)*power^physics.curve end
+local function rollDistance(speed) return math.max(0,(speed*speed-physics.stopSpeed^2)/(2*physics.deceleration)) end
+assert(rollDistance(shotSpeed(0.8))>rollDistance(shotSpeed(0.2)))
+assert(math.abs(rollDistance(30)-44.9875)<0.00001)
+H.VerifyPower=function() return rollDistance(shotSpeed(0.2)),rollDistance(shotSpeed(0.8)) end
+_G.PoolTrainingHelper=H
+local lines,connections={},{}
+local yellow=Color3.fromRGB(255,220,30)
+for i=1,18 do
+ local l=Drawing.new("Line")
+ l.Color=yellow; l.Thickness=2; l.Visible=false; l.ZIndex=90
+ lines[i]=l
+end
+local ghost=Drawing.new("Circle")
+ghost.Color=yellow;ghost.Thickness=2;ghost.NumSides=40
+ghost.Filled=false;ghost.Visible=false;ghost.ZIndex=91
+local endpoint=Drawing.new("Circle")
+endpoint.Color=yellow;endpoint.Radius=8;endpoint.Filled=true;endpoint.Transparency=0.35;endpoint.Visible=false;endpoint.ZIndex=91
+local label=Drawing.new("Text")
+label.Color=yellow;label.Size=16;label.Outline=true;label.Font=1
+label.Position=Vector2.new(20,100);label.Visible=true;label.ZIndex=92
+label.Text="Training: yellow trajectory | X toggle | O remove"
+function H.Stop()
+ if not H.Running then return end
+ H.Running=false
+ for _,c in ipairs(connections) do c:Disconnect() end
+ for _,l in ipairs(lines) do l:Remove() end
+ ghost:Remove();endpoint:Remove();label:Remove()
+end
+local function V(x,y) return {x=x,y=y} end
+local function add(a,b) return V(a.x+b.x,a.y+b.y) end
+local function sub(a,b) return V(a.x-b.x,a.y-b.y) end
+local function mul(a,s) return V(a.x*s,a.y*s) end
+local function dot(a,b) return a.x*b.x+a.y*b.y end
+local function length(a) return math.sqrt(dot(a,a)) end
+local function unit(a) local m=length(a);return m>1e-8 and mul(a,1/m) or V(0,0) end
+local function reflect(d,n) return unit(sub(d,mul(n,2*dot(d,n)))) end
+local function rayCircle(p,d,c,r)
+ local q=sub(c,p);local along=dot(q,d)
+ if along<=0 then return nil end
+ local perp=dot(q,q)-along*along
+ if perp>r*r then return nil end
+ local t=along-math.sqrt(math.max(0,r*r-perp))
+ if t>0.0001 then return t end
+ return nil
+end
+local rails,pockets,jaws={},{},{}
+local function rail(a,b,n) rails[#rails+1]={a=a,b=b,n=n} end
+local corner=4.5/math.sqrt(2)
+rail(V(-44+corner,-22),V(-2.5,-22),V(0,1))
+rail(V(2.5,-22),V(44-corner,-22),V(0,1))
+rail(V(-44+corner,22),V(-2.5,22),V(0,-1))
+rail(V(2.5,22),V(44-corner,22),V(0,-1))
+rail(V(-44,-22+corner),V(-44,22-corner),V(1,0))
+rail(V(44,-22+corner),V(44,22-corner),V(-1,0))
+local function pocket(a,b,side)
+ local centre=mul(add(a,b),0.5)
+ local tangent=unit(sub(b,a))
+ local n=V(tangent.y,-tangent.x)
+ if dot(n,centre)<0 then n=mul(n,-1) end
+ local mouth=length(sub(b,a))
+ local flare=side and math.rad(-14) or 0
+ local radius=mouth/2
+ local bowl=add(centre,mul(n,mouth*(side and 0.8 or 1.4)))
+ local function facing(start)
+  local outward=unit(sub(start,centre))
+  local direction=add(mul(n,math.cos(flare)),mul(outward,math.sin(flare)))
+  local q=sub(bowl,start)
+  local projected=dot(q,direction)
+  local inside=radius*radius-(dot(q,q)-projected*projected)
+  if inside>0 then projected=projected-math.sqrt(inside) end
+  local finish=add(start,mul(direction,math.max(projected,2/math.cos(flare))))
+  local tang=unit(sub(finish,start))
+  local normal=V(-tang.y,tang.x)
+  if dot(normal,sub(centre,start))<0 then normal=mul(normal,-1) end
+  rail(start,finish,normal)
+  jaws[#jaws+1]=start
+ end
+ facing(a);facing(b)
+ pockets[#pockets+1]={c=centre,n=n,mouth=mouth,depth=side and 0.3 or 2.6}
+end
+pocket(V(-44+corner,-22),V(-44,-22+corner),false)
+pocket(V(-44+corner,22),V(-44,22-corner),false)
+pocket(V(44-corner,-22),V(44,-22+corner),false)
+pocket(V(44-corner,22),V(44,22-corner),false)
+pocket(V(-2.5,-22),V(2.5,-22),true)
+pocket(V(-2.5,22),V(2.5,22),true)
+local refs,cue={},nil
+local previous={}
+local quietAt=0
+local function bind(current)
+ local address=current and current.Address or nil
+ if address~=sceneAddress then
+  sceneAddress=address;scene=current;refs={};cue=nil;powerLabel=nil
+  previous={};quietAt=tick()+0.18
+  H.Stats.rebinds=(H.Stats.rebinds or 0)+1
+  H.Stats.visible=0;H.Stats.markerX=nil;H.Stats.markerY=nil
+ end
+ if not current then
+  refs={};cue=nil;powerLabel=nil;H.Waiting=true
+  return false
+ end
+ scene=current
+ local holder=scene:FindFirstChild("Balls")
+ local stick=scene:FindFirstChild("CueStick")
+ cue=stick and stick:FindFirstChildWhichIsA("BasePart")
+ local lp=Players.LocalPlayer
+ local pg=lp and lp:FindFirstChild("PlayerGui")
+ local ui=pg and pg:FindFirstChild("PoolGameUI")
+ local hud=ui and ui:FindFirstChild("Hud")
+ powerLabel=hud and hud:FindFirstChild("PowerLabel")
+ local out={}
+ if holder then
+  for _,b in ipairs(holder:GetChildren()) do
+   local num=tonumber(b.Name:match("^Ball(%d+)$"))
+   if num and num<=15 then out[#out+1]={id=num,part=b} end
+  end
+ end
+ refs=out
+ H.Waiting=not cue or not powerLabel or #out==0
+ H.Stats.sceneAddress=address
+ return not H.Waiting
+end
+H.BindScene=bind
+local function collect()
+ local ok,err=pcall(function() bind(workspace:FindFirstChild("PoolScene3D")) end)
+ if not ok then
+  refs={};cue=nil;powerLabel=nil;H.Waiting=true;H.Stats.collectError=tostring(err)
+ else H.Stats.collectError=nil end
+end
+collect()
+task.spawn(function()
+ while H.Running do
+  collect()
+  task.wait(0.4)
+ end
+end)
+local function cast(p,d,r,balls,ignore,skip)
+ local best={t=1000000,kind="end"}
+ for _,b in ipairs(balls) do
+  if b.id~=ignore and b.id~=skip then
+   local t=rayCircle(p,d,b.p,r+b.r)
+   if t and t<best.t then best={t=t,kind="ball",ball=b} end
+  end
+ end
+ for _,s in ipairs(rails) do
+  local approach=dot(d,s.n)
+  if approach < -1e-7 then
+   local distance=dot(sub(p,s.a),s.n)
+   local t=(r-distance)/approach
+   if distance>=-r and t>0.0001 and t<best.t then
+    local at=add(p,mul(d,t));local delta=sub(s.b,s.a)
+    local span=length(delta);local along=dot(sub(at,s.a),mul(delta,1/span))
+    if along>=0 and along<=span then best={t=t,kind="rail",n=s.n} end
+   end
+  end
+ end
+ for _,j in ipairs(jaws) do
+  local t=rayCircle(p,d,j,r)
+  if t and t<best.t then best={t=t,kind="jaw",n=unit(sub(add(p,mul(d,t)),j))} end
+ end
+ for _,k in ipairs(pockets) do
+  local approach=dot(d,k.n)
+  if approach>1e-7 then
+   local t=(k.depth-dot(sub(p,k.c),k.n))/approach
+   if t>0.0001 and t<best.t then
+    local at=sub(add(p,mul(d,t)),k.c)
+    if math.abs(dot(at,V(-k.n.y,k.n.x)))<=k.mouth/2 then
+     best={t=t,kind="pocket"}
+    end
+   end
+  end
+ end
+ best.p=add(p,mul(d,best.t))
+ return best
+end
+assert(math.abs(rayCircle(V(0,0),V(1,0),V(10,0),2)-8)<0.00001)
+assert(rayCircle(V(0,0),V(1,0),V(10,3),2)==nil)
+local function world(p) return Vector3.new(p.x,5001.125,-p.y) end
+local segments,contact,finish={},nil,nil
+local finishRadius=1.125
+local function segment(a,b,color) segments[#segments+1]={a=a,b=b,color=color} end
+local function trace(p,d,r,balls,id,skip,color,speed)
+ for bounce=0,3 do
+  local remaining=rollDistance(speed)
+  if remaining<0.005 then return nil,d,speed end
+  local hit=cast(p,d,r,balls,id,skip)
+  if remaining<hit.t then
+   local stop=add(p,mul(d,remaining))
+   segment(p,stop,color)
+   if color==yellow then finish=stop end
+   return {kind="stop",p=stop},d,0
+  end
+  segment(p,hit.p,color)
+  if color==yellow then finish=hit.p end
+  speed=math.sqrt(math.max(0,speed*speed-2*physics.deceleration*hit.t))
+  if hit.kind~="rail" and hit.kind~="jaw" then return hit,d,speed end
+  if bounce==3 then return hit,d,speed end
+  local normalSpeed=dot(d,hit.n)*speed
+  local tangent=sub(mul(d,speed),mul(hit.n,normalSpeed))
+  local velocity=sub(mul(tangent,1-physics.railFriction),mul(hit.n,normalSpeed*physics.railRestitution))
+  speed=length(velocity);d=unit(velocity)
+  p=add(hit.p,mul(d,0.002))
+ end
+end
+local elapsed=0
+local function predict()
+ segments={};contact=nil;finish=nil
+ if not H.Enabled or H.Waiting or not cue or not powerLabel or cue.Transparency>0.95 then return end
+ local balls,white={},nil
+ local moved=false
+ for _,ref in ipairs(refs) do
+  local part=ref.part;local pos=part.Position
+  if part.Transparency<0.95 and math.abs(pos.Y-5001.125)<0.6 then
+   local b={id=ref.id,p=V(pos.X,-pos.Z),r=part.Size.X/2}
+   if b.r>0 and b.r<4 and math.abs(b.p.x)<60 and math.abs(b.p.y)<40 then
+    balls[#balls+1]=b
+    if b.id==0 then white=b end
+    local last=previous[b.id]
+    if last and length(sub(b.p,last))>0.015 then moved=true end
+    previous[b.id]=b.p
+   end
+  end
+ end
+ if moved then quietAt=tick()+0.18 end
+ if not white or tick()<quietAt then return end
+ local cp=cue.Position
+ local toward=V(white.p.x-cp.X,white.p.y+cp.Z)
+ local axis=cue.CFrame.RightVector
+ local d=unit(V(axis.X,-axis.Z))
+ if dot(d,toward)<0 then d=mul(d,-1) end
+ if length(d)<0.9 then return end
+ local powerText=powerLabel.Text
+ local percent=tonumber(powerText and powerText:match("([%d%.]+)"))
+ if not percent then H.Stats.powerError="Power HUD unavailable";return end
+ local power=math.clamp(percent/100,0,1)
+ H.Stats.powerPercent=percent
+ local isBreak=#balls==16
+ for _,b in ipairs(balls) do
+  if b.id~=0 and (b.p.x<20 or b.p.x>32 or math.abs(b.p.y)>7) then isBreak=false end
+ end
+ local speed=shotSpeed(power)*(isBreak and physics.breakMultiplier or 1)
+ H.Stats.breakEstimated=isBreak
+ H.Stats.initialRollDistance=rollDistance(speed)
+ local multiplier=isBreak and physics.breakMultiplier or 1
+ local function simulate(selectedPower)
+  segments={};contact=nil;finish=nil
+  local markerRadius=white.r
+  local hit,incoming,impactSpeed=trace(white.p,d,white.r,balls,0,nil,yellow,shotSpeed(selectedPower)*multiplier)
+  local targetNumber=nil
+  if hit and hit.kind=="ball" then
+   contact=hit.p
+   local target=hit.ball
+   targetNumber=target.id;markerRadius=target.r
+   local normal=unit(sub(target.p,hit.p))
+   local transfer=math.max(0,dot(incoming,normal))*(1+physics.ballRestitution)/2
+   trace(target.p,normal,target.r,balls,target.id,0,yellow,impactSpeed*transfer)
+  end
+  return {segments=segments,contact=contact,finish=finish,radius=markerRadius,target=targetNumber}
+ end
+ local actual=simulate(power)
+ local full=simulate(1)
+ segments=full.segments;contact=full.contact;finish=actual.finish;finishRadius=actual.radius
+ H.Stats.target=full.target
+ H.Stats.markerX=finish and finish.x
+ H.Stats.markerY=finish and finish.y
+ H.Stats.linePowerPercent=100
+ local function yellowLength(path)
+  local distance=0
+  for _,s in ipairs(path.segments) do
+   if s.color==yellow then distance=distance+length(sub(s.b,s.a)) end
+  end
+  return distance
+ end
+ H.Stats.yellowLength=yellowLength(full)
+ H.VerifyFullLine=function()
+  local shownSegments,shownContact,shownFinish=segments,contact,finish
+  local low=simulate(0.2)
+  local high=simulate(0.8)
+  local maximum=simulate(1)
+  segments,contact,finish=shownSegments,shownContact,shownFinish
+  return {linePowerPercent=100,yellowLength=yellowLength(maximum),
+   lowX=low.finish and low.finish.x,lowY=low.finish and low.finish.y,
+   highX=high.finish and high.finish.x,highY=high.finish and high.finish.y,
+   lowTravel=yellowLength(low),highTravel=yellowLength(high)}
+ end
+ H.Stats.whiteSegments=0
+ H.Stats.segments=#segments
+ H.Stats.directionX=d.x;H.Stats.directionY=d.y
+end
+local printed=false
+connections[#connections+1]=RS.RenderStepped:Connect(function(dt)
+ if not H.Running then return end
+ elapsed=elapsed+dt
+ if elapsed<1/30 then return end
+ elapsed=0
+ local ok,err=pcall(function()
+  predict()
+  local shown=0
+  for i,l in ipairs(lines) do
+   local s=segments[i]
+   if s then
+    local a,va=WorldToScreen(world(s.a))
+    local b,vb=WorldToScreen(world(s.b))
+    l.Visible=va and vb
+    if va and vb then l.From=a;l.To=b;l.Color=s.color;shown=shown+1 end
+   else l.Visible=false end
+  end
+  ghost.Visible=false
+  if contact then
+   local p,v=WorldToScreen(world(contact))
+   local q,vq=WorldToScreen(world(add(contact,V(1.125,0))))
+   if v and vq then
+    ghost.Position=p;ghost.Radius=math.sqrt((q.X-p.X)^2+(q.Y-p.Y)^2);ghost.Visible=true
+   end
+  end
+  endpoint.Visible=false
+  if finish then
+   local p,v=WorldToScreen(world(finish))
+   local q,vq=WorldToScreen(world(add(finish,V(finishRadius,0))))
+   if v and vq then
+    endpoint.Position=p
+    endpoint.Radius=math.max(3,math.sqrt((q.X-p.X)^2+(q.Y-p.Y)^2))
+    endpoint.Visible=true
+   end
+  end
+  label.Text=H.Waiting and "Waiting for pool training table... | O remove" or H.Enabled and ("Yellow: 100% trajectory | Ball: "..tostring(H.Stats.powerPercent or 0).."% power | X toggle | O remove")
+   or "Training helper paused | X resume | O remove"
+  H.Stats.labelText=label.Text
+  H.Stats.visible=shown;H.Stats.frames=(H.Stats.frames or 0)+1
+  if shown>0 and not printed then print("Pool training preview rendered",shown,"segments");printed=true end
+ end)
+ if not ok then
+  H.Stats.error=tostring(err)
+  refs={};cue=nil;powerLabel=nil;H.Waiting=true
+  for _,l in ipairs(lines) do l.Visible=false end
+  ghost.Visible=false;endpoint.Visible=false
+  label.Text="Reconnecting to table... | O remove"
+ else H.Stats.error=nil end
+end)
+local KEY_X,KEY_O=Enum.KeyCode.X.Value,Enum.KeyCode.O.Value
+local held={}
+local function handleKey(key)
+ if held[key] then return end
+ held[key]=true
+ if key==KEY_X then
+  H.Enabled=not H.Enabled
+  H.Stats.togglePresses=(H.Stats.togglePresses or 0)+1
+  print("Pool helper X pressed: enabled",H.Enabled)
+ elseif key==KEY_O then
+  print("Pool helper O pressed: removed")
+  H.Stop()
+ end
+end
+H.HandleKey=handleKey
+H.ReleaseKey=function(key) held[key]=nil end
+connections[#connections+1]=UIS.InputBegan:Connect(function(input)
+ handleKey(input.KeyCode)
+end)
+connections[#connections+1]=UIS.InputEnded:Connect(function(input)
+ held[input.KeyCode]=nil
+end)
+
+print("Pool helper loaded with automatic table monitoring. X toggle / O remove.")
+
