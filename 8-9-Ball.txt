@@ -3,7 +3,7 @@ local RS=game:GetService("RunService")
 local UIS=game:GetService("UserInputService")
 local Players=game:GetService("Players")
 local scene,sceneAddress,powerLabel=nil,nil,nil
-local H={Enabled=true,Running=true,ShowCollisions=false,Stats={}}
+local H={Enabled=true,Running=true,ShowCollisions=false,Version="safe-hud-1",Stats={}}
 _G.PoolTrainingHelper=H
 local physics={deceleration=10,minSpeed=30,maxSpeed=138,curve=2,stopSpeed=0.5,
  railRestitution=0.72,railFriction=0.20,ballRestitution=0.94,breakMultiplier=2.5,
@@ -263,7 +263,10 @@ local function simulateAll(snapshot,power,doYield)
    end
   end
   if not any then result.settled=true;break end
-  if doYield and step%30==0 and tick()-sliceStart>SIM_SLICE then task.wait();sliceStart=tick() end
+  if doYield and step%30==0 and tick()-sliceStart>SIM_SLICE then
+   task.wait();sliceStart=tick()
+   if not H.Running or (snapshot.epoch and (not H.CurrentInput or H.CurrentInput.base~=snapshot.base)) then return nil end
+  end
  end
  result.settled=true
  for _,ball in ipairs(balls) do flush(ball) end
@@ -344,11 +347,11 @@ local function markerColor(ball,primary,group,ready,extras)
 end
 H.MarkerColor=markerColor
 local lines,extraLines,markers,connections={},{},{},{}
-for i=1,32 do
+for i=1,64 do
  local l=Drawing.new("Line")
  l.Color=yellow;l.Thickness=2;l.Visible=false;l.ZIndex=90;lines[i]=l
 end
-for i=1,512 do
+for i=1,128 do
  local l=Drawing.new("Line")
  l.Color=cyan;l.Thickness=1.5;l.Visible=false;l.ZIndex=89;extraLines[i]=l
 end
@@ -378,7 +381,6 @@ local ownGroup,ownSeat="Unknown",nil
 local warningHud,warningContext=nil,nil
 local warningGroupSignature=nil
 local warningResolveNeeded=false
-local identityRetries,identityRetryAt=0,0
 local groupMemory=nil
 local currentBalls={}
 local profileNames=_G.PoolHelperDisplayNames or {}
@@ -390,9 +392,7 @@ local previous={}
 local quietAt=0
 local epoch=0
 local spinWidget,spinDot,spinIcon=nil,nil,nil
-local spinWidgetAddress,spinSlot,spinOwner=nil,nil,nil
-local spinResolveNeeded=false
-local spinAttempts,spinRetryAt=0,0
+local spinWidgetAddress=nil
 local shown,wasShown={},{}
 local function show(d) d.Visible=true;shown[d]=true end
 local function endFrame()
@@ -419,15 +419,13 @@ function H.Stop()
  for _,w in pairs(warningDrawings) do w.ring:Remove();w.text:Remove() end
  for _,w in pairs(pocketDrawings) do w.ring:Remove();w.text:Remove() end
 end
-local function pointer(value)
- local hex=type(value)=="string" and value:match("0x([%x]+)")
- return hex and tonumber(hex,16) or nil
-end
 local function isPart(inst) local c=inst.ClassName;return c=="MeshPart" or c=="Part" end
 local function firstPart(model)
  if not model then return nil end
- for _,child in ipairs(model:GetChildren()) do if isPart(child) then return child end end
- return model:FindFirstChildWhichIsA("BasePart")
+ local root=model:FindFirstChild("Cue_0")
+ if root and isPart(root) then return root end
+ for _,child in ipairs(model:GetDescendants()) do if isPart(child) then return child end end
+ return nil
 end
 local function cacheCueShape(stick)
  local address=stick and stick.Address or nil
@@ -474,67 +472,11 @@ local function guiSpin()
   -(dotPosition.Y-root.Y-width*0.4)/(width*0.37))
 end
 local function selectedSpin()
- local visual=guiSpin()
- if spinSlot and spinOwner then
-  local ok,spin=pcall(function()
-   assert(memory_read("uintptr",spinOwner+16)==spinWidgetAddress)
-   local p=memory_read("uintptr",spinSlot)
-   assert(p and p>0 and memory_read("int",p+4)==8)
-   local x,y=memory_read("float",p+16),memory_read("float",p+20)
-   assert(x==x and y==y and math.abs(x)<=1.01 and math.abs(y)<=1.01)
-   return normalizeSpin(x,y)
-  end)
-  if ok and (not visual or length(sub(spin,visual))<0.04) then
-   H.Stats.spinSource="live spin";H.Stats.spinError=nil;return spin
-  end
- end
- if visual then H.Stats.spinSource="spin control";H.Stats.spinError=nil;return visual end
- H.Stats.spinSource="unavailable";H.Stats.spinError="Spin control unavailable";return V(0,0)
+ local ok,visual=pcall(guiSpin)
+ if ok and visual then H.Stats.spinSource="spin control";H.Stats.spinError=nil;return visual end
+ H.Stats.spinSource="unavailable";H.Stats.spinError="Spin unavailable: assuming centre";return V(0,0)
 end
 H.ReadSpin=selectedSpin
-local function resolveSpin(address)
- local hits=getgc({"SpinWidget","Spin"})
- local widgets={}
- local spins={}
- for _,h in ipairs(hits) do
-  if h.type=="userdata" and h.tbl then
-   if h.key=="SpinWidget" then
-    local p=pointer(h.value)
-    if p and memory_read("int",p+4)==16 and memory_read("uintptr",p+16)==address then
-     widgets[#widgets+1]={table=h.tbl,owner=p}
-    end
-   elseif h.key=="Spin" then spins[#spins+1]=h end
-  end
- end
- for _,widget in ipairs(widgets) do
-  for _,candidate in ipairs(spins) do
-   if math.abs(candidate.tbl-widget.table)<4096 then
-    local rows=readtbl(candidate.tbl,128)
-    local slot,owner=nil,nil
-    for _,row in ipairs(rows) do
-     if row.key=="Spin" and row.type=="userdata" then slot=row.addr end
-     if row.key=="SpinWidget" and row.type=="userdata" then owner=pointer(row.value) end
-    end
-    if slot and owner and memory_read("uintptr",owner+16)==address and spinWidgetAddress==address then
-     spinSlot=slot;spinOwner=owner;return
-    end
-   end
-  end
- end
-end
-task.spawn(function()
- while H.Running do
-  if not spinResolveNeeded and spinWidgetAddress and not spinSlot and spinAttempts>0 and spinAttempts<3 and tick()>=spinRetryAt then
-   spinResolveNeeded=true
-  end
-  if spinResolveNeeded and spinWidgetAddress then
-   spinResolveNeeded=false;spinAttempts=spinAttempts+1;spinRetryAt=tick()+5
-   local ok,err=pcall(resolveSpin,spinWidgetAddress)
-   H.Stats.spinResolveError=not ok and tostring(err) or nil
-  end
-  task.wait(0.5)
- end
-end)
 local function cleanName(value)
  local name=(value or ""):gsub("<[^>]*>","")
  name=name:match("^(.-)%s+·%s*") or name
@@ -564,52 +506,6 @@ local function resolveSide(userId,username,display,names,mode,seats)
  return found,found and "Unique player name" or "Waiting for user identity"
 end
 H.ResolveSide=resolveSide
-local identitySlots={}
-local function nativeIdentityFields(address)
- if not address or address<65536 then return nil end
- local nodes=memory_read("uintptr",address+16)
- if not nodes or nodes<65536 then return nil end
- local out={}
- for _,row in ipairs(readtbl(nodes,64)) do out[row.key]=row end
- return out
-end
-local function identityString(row)
- if not row or row.type~="string" then return nil end
- return row.value and row.value:match('^"(.*)"$')
-end
-local function nativeIdentitySeats(slot,names)
- local fields=nativeIdentityFields(memory_read("uintptr",slot))
- if not fields or not fields.Seats or not fields.Phase or not fields.Turn then return nil end
- local phase=identityString(fields.Phase)
- if phase~="Playing" then return nil end
- local seats=memory_read("uintptr",fields.Seats.addr)
- if not seats or seats<65536 then return nil end
- local count=memory_read("int",seats+8)
- local array=memory_read("uintptr",seats+24)
- if not count or count<2 or count>16 or not array or array<65536 then return nil end
- local result={}
- for i=1,2 do
-  local entry=nativeIdentityFields(memory_read("uintptr",array+(i-1)*16))
-  if not entry or not entry.UserId or entry.UserId.type~="number" then return nil end
-  local id=memory_read("double",entry.UserId.addr)
-  local display=identityString(entry.DisplayName)
-  if not id or id~=id or math.abs(id)>9007199254740991 or id~=math.floor(id) or not display or cleanName(display)~=cleanName(names[i]) then return nil end
-  result[i]={UserId=id,DisplayName=display}
- end
- return result
-end
-H.ReadIdentitySeats=nativeIdentitySeats
-local function identityFromSlots(names)
- local result=nil
- for _,slot in ipairs(identitySlots) do
-  local ok,seats=pcall(nativeIdentitySeats,slot,names)
-  if ok and seats then
-   if result and (result[1].UserId~=seats[1].UserId or result[2].UserId~=seats[2].UserId) then return false end
-   result=seats
-  end
- end
- return result
-end
 local function chipGroup(panel)
  local chips=panel and panel:FindFirstChild("Chips")
  local solid,stripe,open=0,0,0
@@ -648,17 +544,10 @@ local function refreshOwnGroup()
  end
  local signature=mode.."|"..names[1].."|"..names[2]
  if signature~=warningGroupSignature then
-  warningGroupSignature=signature;identitySlots={};warningResolveNeeded=true
-  identityRetries=0;identityRetryAt=tick()+3;groupMemory=nil
+  warningGroupSignature=signature;warningResolveNeeded=true
+  groupMemory=nil
  end
  local seats=nil
- if mode=="Online" then
-  seats=identityFromSlots(names)
-  if seats then identityRetries=0
-  elseif not warningResolveNeeded and #identitySlots>0 and identityRetries<6 and tick()>=identityRetryAt then
-   identityRetries=identityRetries+1;identityRetryAt=tick()+math.min(20,3*identityRetries);warningResolveNeeded=true
-  end
- end
  local source=nil
  if seats==false then source="Ambiguous match identity"
  else ownSeat,source=resolveSide(lp.UserId,lp.Name,profileNames[tostring(lp.UserId)],names,mode,seats) end
@@ -677,20 +566,9 @@ local function refreshOwnGroup()
 end
 H.RefreshOwnGroup=refreshOwnGroup
 local function resolveIdentity()
- local context,signature=warningContext,warningGroupSignature
  local mode=warningHud.Parent:GetAttribute("MatchMode")
  if mode~="Online" and mode~="Bots" then return end
- local ok,err=pcall(function()
-  local slots={}
-  for _,hit in ipairs(mode=="Online" and getgc("poolMatch") or {}) do
-   if hit.type=="function" or hit.type=="table" then
-    local f=nativeIdentityFields(memory_read("uintptr",hit.addr))
-    if f and f.Seats and f.Phase and f.Turn then slots[#slots+1]=hit.addr end
-   end
-  end
-  if context==warningContext and signature==warningGroupSignature then identitySlots=slots;H.Stats.identityCandidates=#slots end
- end)
- H.Stats.identityError=not ok and tostring(err) or nil
+ H.Stats.identityCandidates=0
  local lp=Players.LocalPlayer
  local id=lp and tostring(lp.UserId)
  if id and not profileNames[id] then
@@ -738,7 +616,7 @@ local function bind(current)
  local widget=hud and hud:FindFirstChild("SpinWidget")
  local newAddress=widget and widget.Address or nil
  if newAddress~=spinWidgetAddress then
-  spinWidgetAddress=newAddress;spinSlot=nil;spinOwner=nil;spinResolveNeeded=newAddress~=nil;spinAttempts=0;spinRetryAt=0
+  spinWidgetAddress=newAddress
  end
  spinWidget=widget;spinDot=widget and widget:FindFirstChild("Dot");spinIcon=widget and widget:FindFirstChild("Icon")
  local out={}
@@ -761,6 +639,7 @@ collect()
 task.spawn(function() while H.Running do collect();task.wait(0.4) end end)
 
 local function snapshot()
+ H.Stats.previewStatus="Waiting for table / cue / HUD"
  if not H.Enabled or H.Waiting or not cue or not powerLabel then latest=nil;currentBalls={};return end
  local balls,white={},nil
  local moved=false
@@ -779,15 +658,17 @@ local function snapshot()
  end
  currentBalls=balls
  if moved then quietAt=tick()+0.18 end
- if not white or tick()<quietAt or cue.Transparency>0.95 then latest=nil;return end
+ if not white then H.Stats.previewStatus="Cue ball not on table";latest=nil;return end
+ if tick()<quietAt then H.Stats.previewStatus="Balls moving";latest=nil;return end
+ if cue.Transparency>0.95 then H.Stats.previewStatus="Cue hidden (waiting for aim)";latest=nil;return end
  local cp=cue.Position
  local toward=V(white.p.x-cp.X,white.p.y+cp.Z)
  local axis=cue.CFrame.RightVector
  local axisDirection=unit(V(axis.X,-axis.Z))
- if length(axisDirection)<0.9 then latest=nil;return end
+ if length(axisDirection)<0.9 then H.Stats.previewStatus="Cue direction unavailable";latest=nil;return end
  local direction=dot(axisDirection,toward)<0 and mul(axisDirection,-1) or axisDirection
  local percent=tonumber((powerLabel.Text or ""):match("([%d%.]+)"))
- if not percent then latest=nil;return end
+ if not percent then H.Stats.previewStatus="Power label unavailable";latest=nil;return end
  local spin=selectedSpin()
  H.Stats.spinX=spin.x;H.Stats.spinY=spin.y
  table.sort(balls,function(a,b) return a.id<b.id end)
@@ -802,7 +683,7 @@ local function snapshot()
  local base=table.concat(parts,"|")
  latest={balls=balls,direction=direction,spin=spin,power=selectedPower,
   percent=percent,isBreak=isBreak,base=base,key=base..":"..string.format("%.5f",selectedPower),epoch=epoch}
- H.Stats.powerPercent=percent
+ H.Stats.powerPercent=percent;H.Stats.previewStatus="Computing preview"
 end
 H.Simulate=simulateAll
 task.spawn(function()
@@ -812,10 +693,11 @@ task.spawn(function()
    local start=tick()
    local ok,err=pcall(function()
     local guide=guideCache and guideCache.base==input.base and guideCache.result or simulateAll(input,1,true)
+    if not guide then return end
     guideCache={base=input.base,result=guide}
     if latest and latest.base==input.base and latest.epoch==input.epoch then input=latest end
     local actual=input.power==1 and guide or simulateAll(input,input.power,true)
-    if H.Running and epoch==input.epoch and latest and latest.base==input.base then
+    if actual and H.Running and epoch==input.epoch and latest and latest.base==input.base then
      preview={key=input.key,base=input.base,guide=guide,actual=actual,spin=input.spin,power=input.power}
      H.Stats.collisions=actual.collisions;H.Stats.settled=actual.settled
      H.Stats.computeMs=math.floor((tick()-start)*1000)
@@ -880,9 +762,39 @@ local function setLabel(text)
  if text~=lastLabel then label.Text=text;lastLabel=text end
  H.Stats.labelText=text
 end
+local function immediateGuide(input)
+ local white=nil
+ for _,b in ipairs(input.balls) do if b.id==0 then white=b;break end end
+ if not white then return nil end
+ local p,d=white.p,input.direction
+ local distance=200
+ local target=nil
+ for _,b in ipairs(input.balls) do
+  if b.id~=0 then
+   local t=timeCircle(b.p.x-p.x,b.p.y-p.y,-d.x,-d.y,white.r+b.r,distance)
+   if t and t<distance then distance=t;target=b.id end
+  end
+ end
+ for _,r in ipairs(rails) do
+  local t=timeRail(p,d,white.r,r,distance)
+  if t and t<distance then distance=t;target=nil end
+ end
+ for _,j in ipairs(jaws) do
+  local t=timeCircle(j.x-p.x,j.y-p.y,-d.x,-d.y,white.r,distance)
+  if t and t<distance then distance=t;target=nil end
+ end
+ for _,k in ipairs(pockets) do
+  local t=timePocket(p,d,k,distance)
+  if t and t<distance then distance=t;target=nil end
+ end
+ return {a=p,b=add(p,mul(d,distance))},target
+end
+H.ImmediateGuide=immediateGuide
 local function render()
  snapshot()
+ H.CurrentInput=latest
  local mainCount,extraCount,markerCount,blueCount=0,0,0,0
+ H.Stats.projectedLines=0
  local ready=eightIsReady(currentBalls,ownGroup)
  local nine=ownGroup=="NineBall"
  local lowest=nine and lowestBall(currentBalls) or nil
@@ -890,6 +802,7 @@ local function render()
  H.Stats.eightReady=ready;H.Stats.eightWarning=false;H.Stats.eightLineWarning=false;H.Stats.eightIndicator=false;H.Stats.scratchWarning=false;H.Stats.safeBadges=0;H.Stats.opponentBadges=0;H.Stats.predictedPots=0
  H.Stats.nineBall=nine;H.Stats.lowestBall=lowest;H.Stats.nineFoul=false
  if H.Enabled and latest and preview and preview.base==latest.base then
+  H.Stats.previewStatus="Ready"
   local guide,actual=preview.guide,preview.actual
   local live={}
   for _,ball in ipairs(currentBalls) do live[ball.id]=ball end
@@ -901,7 +814,10 @@ local function render()
   local function mainLine(s)
    if mainCount<#lines then
     mainCount=mainCount+1
-    if drawLine(lines[mainCount],s,mainColor) and eightDanger then H.Stats.eightLineWarning=true end
+    if drawLine(lines[mainCount],s,mainColor) then
+     H.Stats.projectedLines=H.Stats.projectedLines+1
+     if eightDanger then H.Stats.eightLineWarning=true end
+    end
    end
   end
   local cueGuide=guide.byId[0]
@@ -949,6 +865,16 @@ local function render()
    end
   end
  end
+ if H.Enabled and latest and (not preview or preview.base~=latest.base) then
+  local segment,target=immediateGuide(latest)
+  if segment then
+   local danger=(target==8 and eightRisk) or (nine and target and lowest and target~=lowest)
+   if drawLine(lines[1],segment,danger and red or yellow) then
+    mainCount=1;H.Stats.projectedLines=1
+   end
+   H.Stats.previewStatus="Aiming (first segment)"
+  end
+ end
  endFrame()
  local text=H.Waiting and "Waiting for pool table... | Hold O: remove" or not H.Enabled and "Preview paused | X resume | Hold O: remove"
   or ("Main 100% | Balls + extra lines: "..tostring(H.Stats.powerPercent or 0).."% | SPACE: extra lines "..(H.ShowCollisions and "ON" or "OFF").." | X toggle | Hold O: remove")
@@ -961,6 +887,9 @@ local function render()
  if ownSeat then text=text.." | Your side: "..(ownSeat==1 and "Left" or "Right")
  else text=text.." | "..(H.Stats.sideSource or "Waiting for user identity") end
  if H.Stats.spinError then text=text.." | "..H.Stats.spinError end
+ if H.Stats.simulationError then text=text.." | Simulation: "..H.Stats.simulationError
+ elseif H.Stats.collectError then text=text.." | Table: "..H.Stats.collectError
+ elseif H.Enabled and H.Stats.previewStatus~="Ready" then text=text.." | "..(H.Stats.previewStatus or "Loading") end
  setLabel(text)
  H.Stats.frames=(H.Stats.frames or 0)+1;H.Stats.visible=mainCount;H.Stats.extraPaths=extraCount;H.Stats.actualPaths=mainCount+extraCount;H.Stats.markers=markerCount;H.Stats.blueMarkers=blueCount
 end
@@ -975,6 +904,8 @@ connections[#connections+1]=RS.RenderStepped:Connect(function(dt)
  if elapsed<0.03 then return end
  elapsed=0
  local ok,err=pcall(render)
- if not ok then H.Stats.error=tostring(err);hide() else H.Stats.error=nil end
+ if not ok then
+  H.Stats.error=tostring(err);hide();setLabel("Pool helper error: "..tostring(err).." | Hold O: remove")
+ else H.Stats.error=nil end
 end)
 print("8-Ball Duels: 8-ball line warning loaded. SPACE extra lines / X toggle / hold O remove.")
